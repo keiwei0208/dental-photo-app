@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>勤美患者拍照工具 - 臉部辨識輔助 v33</title>
+
+   <script src="https://cdn.tailwindcss.com"></script>
+   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+
+   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+   <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+
+   <style>
+       body {
+           font-family: 'Inter', sans-serif;
+       }
+       @keyframes ping-once {
+           0% { transform: translate(-50%, -50%) scale(0.2); opacity: 1; }
+           80% { transform: translate(-50%, -50%) scale(1.2); opacity: 0; }
+           100% { transform: translate(-50%, -50%) scale(1.2); opacity: 0; }
+       }
+       .animate-ping-once {
+           animation: ping-once 1s cubic-bezier(0, 0, 0.2, 1) forwards;
+       }
+       /* 讓 video-container 佔滿整個可用空間，並調整高度 */
+       .video-container {
+           width: 100%;
+           height: 70vh; /* 調整高度，使其看起來更長 */
+           max-height: 800px; /* 限制最大高度 */
+           display: flex;
+           align-items: center;
+           justify-content: center;
+           overflow: hidden;
+           position: relative; /* Essential for overlaying canvas */
+       }
+       /* 讓 video 元素在容器內填滿，並保持比例 */
+       .video-container video {
+           width: 100%;
+           height: 100%;
+           object-fit: contain; /* 保持比例，如果容器不夠大，會出現黑邊 */
+       }
+       .overlay-elements {
+           position: absolute;
+           top: 0;
+           left: 0;
+           width: 100%;
+           height: 100%;
+           pointer-events: none;
+           display: flex;
+           align-items: center;
+           justify-content: center;
+       }
+       /* Removed modal styles */
+       .face-overlay-canvas {
+           position: absolute;
+           top: 0;
+           left: 0;
+           z-index: 15; /* Higher than grid lines */
+       }
+   </style>
+</head>
+<body>
+   <div id="root"></div>
+
+   <script type="text/babel">
+       const { useRef, useEffect, useState, useCallback } = React;
+       const { createRoot } = ReactDOM;
+
+       // Helper to check if eyes are relatively straight (for frontal view)
+       const checkEyesLookingStraight = (landmarks, videoHeight) => {
+           if (!landmarks) return false;
+           const leftEye = landmarks.getLeftEye(); // Points 36-41
+           const rightEye = landmarks.getRightEye(); // Points 42-47
+           const nose = landmarks.getNose(); // Points 27-35 (nose tip is roughly point 30, index 3)
+
+           if (leftEye.length === 0 || rightEye.length === 0 || nose.length < 4) return false;
+
+           // 計算每隻眼睛的平均 Y 座標，檢查水平對齊
+           const getAverageY = (points) => points.reduce((sum, p) => sum + p.y, 0) / points.length;
+           const leftEyeAvgY = getAverageY(leftEye);
+           const rightEyeAvgY = getAverageY(rightEye);
+
+           // 眼睛水平誤差容忍度 (例如，視訊高度的 2%)
+           const eyeLevelThreshold = 0.02 * videoHeight;
+           const areEyesLevel = Math.abs(leftEyeAvgY - rightEyeAvgY) < eyeLevelThreshold;
+
+           // 檢查鼻尖與兩眼中心點中點的水平對齊 (作為額外的正面判斷依據)
+           const noseTip = nose[3]; // 大約是鼻尖 (landmark point 30)
+           const leftEyeCenterX = leftEye.reduce((sum, p) => sum + p.x, 0) / leftEye.length;
+           const rightEyeCenterX = rightEye.reduce((sum, p) => sum + p.x, 0) / rightEye.length;
+           const eyeMidpointX = (leftEyeCenterX + rightEyeCenterX) / 2;
+
+           const noseAlignmentThreshold = 0.03 * videoHeight; // 鼻尖對齊誤差容忍度 (例如，視訊高度的 3%)
+           const isNoseAligned = Math.abs(noseTip.x - eyeMidpointX) < noseAlignmentThreshold;
+
+           return areEyesLevel && isNoseAligned;
+       };
+
+       // Function to draw static guide lines for a simplified head and shoulders (frontal view, dashed)
+       // Now takes `isReady` to change color
+       const drawFrontalGuideLines = (canvas, isReady) => {
+           const ctx = canvas.getContext('2d');
+           ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+           const canvasWidth = canvas.width;
+           const canvasHeight = canvas.height;
+
+           // Change color based on ready status
+           ctx.strokeStyle = isReady ? 'rgba(255, 255, 255, 0.7)' : 'rgba(255, 255, 0, 0.7)'; // White or Yellow
+           ctx.lineWidth = 2;
+           ctx.lineJoin = 'round';
+           ctx.setLineDash([8, 8]); // Dashed lines (8px dash, 8px gap)
+
+           const centerX = canvasWidth / 2;
+           const centerY = canvasHeight / 2;
+           
+           const headScale = 0.55; 
+           const shoulderScale = 0.8; 
+           const neckScale = 0.45; 
+
+           const headWidth = canvasWidth * headScale;
+           const headHeight = canvasHeight * (headScale + 0.05); 
+           const shoulderWidth = canvasWidth * shoulderScale;
+           const neckWidth = headWidth * neckScale;
+           const neckHeight = headHeight * 0.15;
+
+           const headTopY = centerY - headHeight * 0.65; 
+           const headBottomY = headTopY + headHeight;
+           const neckTopY = headBottomY;
+           const neckBottomY = neckTopY + neckHeight;
+           const shoulderTopY = neckBottomY;
+           const shoulderBottomY = shoulderTopY + canvasHeight * 0.22; 
+
+           ctx.beginPath();
+           ctx.arc(centerX, headTopY + headWidth * 0.5, headWidth * 0.5, Math.PI, 0, false);
+           ctx.lineTo(centerX + headWidth * 0.5, headBottomY); 
+           ctx.lineTo(centerX + neckWidth / 2, neckBottomY); 
+           ctx.bezierCurveTo(centerX + shoulderWidth * 0.3, shoulderTopY + canvasHeight * 0.05, 
+                             centerX + shoulderWidth * 0.4, shoulderBottomY,                     
+                             centerX + shoulderWidth / 2, shoulderBottomY);                       
+           ctx.lineTo(centerX - shoulderWidth / 2, shoulderBottomY);
+           ctx.bezierCurveTo(centerX - shoulderWidth * 0.4, shoulderBottomY,                     
+                             centerX - shoulderWidth * 0.3, shoulderTopY + canvasHeight * 0.05, 
+                             centerX - neckWidth / 2, neckBottomY);                               
+           ctx.lineTo(centerX - headWidth * 0.5, headBottomY); 
+           ctx.closePath(); 
+           ctx.stroke();
+
+           // --- Draw Facial Features ---
+           // Eyes (as two prominent ovals/rectangles, like glasses)
+           const eyeWidth = headWidth * 0.15;
+           const eyeHeight = headHeight * 0.08;
+           const eyeY = centerY - headHeight * 0.25; 
+
+           ctx.beginPath();
+           ctx.ellipse(centerX - headWidth * 0.2, eyeY, eyeWidth, eyeHeight, 0, 0, Math.PI * 2);
+           ctx.stroke();
+
+           ctx.beginPath();
+           ctx.ellipse(centerX + headWidth * 0.2, eyeY, eyeWidth, eyeHeight, 0, 0, Math.PI * 2);
+           ctx.stroke();
+
+           // Nose (simple triangle shape)
+           const noseTopY = eyeY + eyeHeight * 1.5; 
+           const noseBottomY = noseTopY + headHeight * 0.1; 
+           const noseBaseWidth = headWidth * 0.08;
+
+           ctx.beginPath();
+           ctx.moveTo(centerX, noseTopY);
+           ctx.lineTo(centerX - noseBaseWidth / 2, noseBottomY);
+           ctx.lineTo(centerX + noseBaseWidth / 2, noseBottomY);
+           ctx.closePath();
+           ctx.stroke();
+
+           // Ears (simplified outer contour)
+           const earHorizontalOffset = headWidth * 0.53; 
+           const earTopY = centerY - headHeight * 0.35; 
+           const earBottomY = centerY + headHeight * 0.05; 
+
+           ctx.beginPath();
+           ctx.moveTo(centerX - earHorizontalOffset, earTopY);
+           ctx.bezierCurveTo(centerX - earHorizontalOffset - headWidth * 0.05, earTopY + headHeight * 0.1, 
+                             centerX - earHorizontalOffset - headWidth * 0.05, earBottomY - headHeight * 0.1, 
+                             centerX - earHorizontalOffset, earBottomY);
+           ctx.stroke();
+
+           ctx.beginPath();
+           ctx.moveTo(centerX + earHorizontalOffset, earTopY);
+           ctx.bezierCurveTo(centerX + earHorizontalOffset + headWidth * 0.05, earTopY + headHeight * 0.1,
+                             centerX + earHorizontalOffset + headWidth * 0.05, earBottomY - headHeight * 0.1,
+                             centerX + earHorizontalOffset, earBottomY);
+           ctx.stroke();
+
+           ctx.setLineDash([]); 
+       };
+
+       // MODIFIED FUNCTION: Clears canvas, draws nothing.
+       const drawSideProfileGuideLines = (canvas) => {
+           const ctx = canvas.getContext('2d');
+           ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear previous drawings
+           ctx.setLineDash([]); // Ensure line dash is reset
+           // No specific lines drawn here.
+       };
+
+       // MODIFIED FUNCTION: Clears canvas, draws nothing.
+       const drawFortyFiveDegreeGuideLines = (canvas) => {
+           const ctx = canvas.getContext('2d');
+           ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear previous drawings
+           ctx.setLineDash([]); // Ensure line dash is reset
+           // No specific lines drawn here.
+       };
+
+
+       function App() {
+           const videoRef = useRef(null);
+           const photoCanvasRef = useRef(null);
+           const faceCanvasRef = useRef(null); // Ref for face overlay canvas
+           const faceDetectionIntervalRef = useRef(null); 
+
+           const [appState, setAppState] = useState('intro');
+           const [loadingMessage, setLoadingMessage] = useState("載入攝影機中...");
+           const [cameraError, setCameraError] = useState(false); // Indicates a critical camera/model error
+           const [isCameraReady, setIsCameraReady] = useState(false); // Camera stream is playing
+           const [modelsInitialized, setModelsInitialized] = useState(false); // Face-api models loaded status
+           const [capturedImages, setCapturedImages] = useState([]);
+           const MAX_PHOTOS = 3;
+           const [photoCount, setPhotoCount] = useState(0);
+
+           const [zoomLevel, setZoomLevel] = useState(1.0);
+           const ZOOM_STEP = 0.1;
+           const MIN_ZOOM = 1.0;
+           const MAX_ZOOM = 3.0;
+           const [focusPoint, setFocusPoint] = useState({ x: 50, y: 50, visible: false });
+
+           const [llmTip, setLlmTip] = useState('');
+           const [isLlmLoading, setIsLlmLoading] = useState(false);
+           const [analysisResult, setAnalysisResult] = useState('');
+           const [isAnalysisLoading, setIsAnalysisLoading] = useState(false);
+           const [summaryReport, setSummaryReport] = useState('');
+           const [isSummaryLoading, setIsSummaryLoading] = useState(false);
+           // Removed isFlashlightOn and supportsTorch states
+           // Removed exposureCompensation state
+
+           const [faceDetected, setFaceDetected] = useState(false); // General face detected state (anywhere in frame)
+           const [faceReadyForFrontPhoto, setFaceReadyForFrontPhoto] = useState(false); // Specific for frontal photo (centered + contour + gaze)
+           const [gazeStraight, setGazeStraight] = useState(false); // New state for eye gaze for frontal photo
+           // Removed showTipModal state
+
+           const photoAngleNames = ["正面", "側面", "側面45°"];
+           const photoNotes = [
+               "請將患者臉部對準畫面中央，確保正面對稱、耳朵與臉頰輪廓完整露出，並請患者直視鏡頭。", 
+               "請將患者側面輪廓對準畫面中央，方便確認咬合平面及嘴唇豐隆度。", 
+               "請將患者45度側面輪廓對準畫面中央，輔助確認美觀及豐隆度。"
+           ];
+
+           // Function to load face-api.js models
+           const loadFaceModels = useCallback(async () => {
+               try {
+                   setLoadingMessage("載入人臉辨識模型中...");
+                   // Standardize to cdn.jsdelivr.net for all models
+                   const weightsPath = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/';
+                   
+                   await faceapi.nets.tinyFaceDetector.loadFromUri(weightsPath);
+                   await faceapi.nets.faceLandmark68Net.loadFromUri(weightsPath); // Still needed for gaze detection
+                   
+                   setLoadingMessage("人臉辨識模型載入完成。");
+                   setModelsInitialized(true);
+                   setCameraError(false); // Clear any previous model loading errors
+                   return true;
+               } catch (error) {
+                   console.error("載入人臉辨識模型失敗:", error);
+                   setLoadingMessage("錯誤: 載入人臉辨識模型失敗。請檢查網路連線或稍後再試。");
+                   setCameraError(true); // Indicate a critical error
+                   setModelsInitialized(true); // Mark as attempted to initialize (even if failed)
+                   return false;
+               }
+           }, []);
+
+           // Function to start video stream and face detection
+           const startVideo = useCallback(async () => {
+               setLoadingMessage("啟動攝影機中...");
+               setCameraError(false);
+               setIsCameraReady(false);
+               try {
+                   const stream = await navigator.mediaDevices.getUserMedia({
+                       video: {
+                           facingMode: { exact: "environment" },
+                           width: { ideal: 3840, min: 2560 },    // Request 4K (UHD) resolution
+                           height: { ideal: 2160, min: 1440 },   // Request 4K (UHD) resolution
+                           frameRate: { ideal: 30, min: 24 }
+                       }
+                   });
+                   if (videoRef.current) {
+                       videoRef.current.srcObject = stream;
+                       videoRef.current.onloadedmetadata = async () => {
+                           try {
+                               await videoRef.current.play();
+                               setLoadingMessage("攝影機已啟動。");
+                               setIsCameraReady(true);
+
+                               // Generate tip when camera is ready (no modal now)
+                               await generatePhotoTip();
+
+                               // Clear previous interval and start new face detection
+                               if (faceDetectionIntervalRef.current) clearInterval(faceDetectionIntervalRef.current);
+                               faceDetectionIntervalRef.current = setInterval(async () => {
+                                   if (videoRef.current && !videoRef.current.paused) {
+                                       // Detect faces with landmarks for more detailed checks (for gaze and contour checks)
+                                       const detections = await faceapi.detectAllFaces(videoRef.current, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks();
+                                       
+                                       let currentFaceDetected = detections.length > 0;
+                                       let currentFaceReadyForFrontPhoto = false;
+                                       let currentGazeStraight = false;
+
+                                       const videoElement = videoRef.current;
+                                       const videoWidth = videoElement.videoWidth;
+                                       const videoHeight = videoElement.videoHeight;
+                                       
+                                       // Setup face canvas for drawing
+                                       if (faceCanvasRef.current) {
+                                           // Set canvas dimensions to match video element's displayed size for accurate overlay
+                                           faceCanvasRef.current.width = videoElement.offsetWidth;
+                                           faceCanvasRef.current.height = videoElement.offsetHeight;
+                                           const ctx = faceCanvasRef.current.getContext('2d');
+                                           ctx.clearRect(0, 0, faceCanvasRef.current.width, faceCanvasRef.current.height);
+                                       }
+
+                                       if (photoCount === 0) { // Stricter logic for the first photo (正面)
+                                           // Re-draw static guide lines on each interval for consistency
+                                           // Pass faceReadyForFrontPhoto status to drawFrontalGuideLines for visual feedback
+                                           if (currentFaceDetected && detections[0]) { 
+                                               const detection = detections[0];
+
+                                               // Centering check (tighter central zone)
+                                               const centralZone_x_min = videoWidth * 0.35; 
+                                               const centralZone_x_max = videoWidth * 0.65; 
+                                               const centralZone_y_min = videoHeight * 0.3; 
+                                               const centralZone_y_max = videoHeight * 0.7; 
+
+                                               const box = detection.detection.box; 
+                                               const faceCenterX = box.x + box.width / 2;
+                                               const faceCenterY = box.y + box.height / 2;
+
+                                               const isCentered = (faceCenterX >= centralZone_x_min && faceCenterX <= centralZone_x_max &&
+                                                                   faceCenterY >= centralZone_y_min && faceCenterY <= centralZone_y_max);
+                                               
+                                               // Contour complete check (face box entirely within a small padded frame)
+                                               const edge_padding_x = videoWidth * 0.02; 
+                                               const edge_padding_y = videoHeight * 0.02; 
+
+                                               const isContourComplete = (box.x >= edge_padding_x && box.y >= edge_padding_y &&
+                                                                          (box.x + box.width) <= (videoWidth - edge_padding_x) &&
+                                                                          (box.y + box.height) <= (videoHeight - edge_padding_y));
+                                               
+                                               // Gaze straight check
+                                               currentGazeStraight = checkEyesLookingStraight(detection.landmarks, videoHeight);
+
+                                               // Combine all conditions for the first photo
+                                               currentFaceReadyForFrontPhoto = isCentered && isContourComplete && currentGazeStraight;
+                                           } else {
+                                                currentFaceReadyForFrontPhoto = false; // No face means not ready
+                                           }
+
+                                           if (faceCanvasRef.current && videoElement) {
+                                               drawFrontalGuideLines(faceCanvasRef.current, currentFaceReadyForFrontPhoto);
+                                           }
+                                           setFaceReadyForFrontPhoto(currentFaceReadyForFrontPhoto);
+                                           setGazeStraight(currentGazeStraight);
+                                       } else if (photoCount === 1) { // Logic for the second photo (側面) - NO GUIDE LINE
+                                            if (faceCanvasRef.current && videoElement) {
+                                               drawSideProfileGuideLines(faceCanvasRef.current); // Clears canvas, draws nothing
+                                           }
+                                           currentFaceReadyForFrontPhoto = currentFaceDetected; // For side, just need face detected
+                                           setFaceReadyForFrontPhoto(true); 
+                                           setGazeStraight(true); // No gaze check needed for side photo
+                                       }
+                                       else { // For photoCount 2 (45 degree side), only general face detection is needed
+                                           if (faceCanvasRef.current && videoElement) {
+                                               drawFortyFiveDegreeGuideLines(faceCanvasRef.current); // Clears canvas, draws nothing
+                                           }
+                                           currentFaceReadyForFrontPhoto = currentFaceDetected; // Any face detection is enough
+                                           setFaceReadyForFrontPhoto(true); 
+                                           setGazeStraight(true); 
+                                       }
+                                       setFaceDetected(currentFaceDetected);
+                                   }
+                               }, 100); 
+
+                               const track = stream.getVideoTracks()[0];
+                               if (track) {
+                                   const settings = track.getSettings();
+                                   console.log("實際影像設定:", settings);
+                                   if (settings.width && settings.height) {
+                                     console.log(`取得解析度: ${settings.width}x${settings.height}`);
+                                   }
+                                   if (settings.frameRate) {
+                                     console.log(`取得幀率: ${settings.frameRate} FPS`);
+                                   }
+                                   // Removed torch support check
+                                   // Removed exposure compensation application
+                               }
+                           } catch (playError) {
+                               console.error("攝影機播放失敗:", playError);
+                               setLoadingMessage("錯誤: 攝影機無法播放。請重試或檢查權限。");
+                               setCameraError(true);
+                               setIsCameraReady(false);
+                           }
+                       };
+                       videoRef.current.onerror = () => {
+                           console.error("攝影機串流發生錯誤。");
+                           setLoadingMessage("錯誤：攝影機串流時發生問題。");
+                           setCameraError(true);
+                           setIsCameraReady(false);
+                       };
+                   }
+               } catch (err) {
+                   console.error("無法取得後置攝影機權限或後置攝影機不可用：", err);
+                   if (err.name === "OverconstrainedError") {
+                       setLoadingMessage("錯誤：無法滿足攝影機請求規格 (如4K解析度)。您的裝置可能不支援此解析度。");
+                   } else if (err.name === "NotAllowedError") {
+                        setLoadingMessage("錯誤：攝影機權限未授予。請檢查瀏覽器設定。");
+                   }
+                   else {
+                       setLoadingMessage("錯誤：無法取得後置攝影機。請檢查瀏覽器設定並允許攝影機權限。");
+                   }
+                   setCameraError(true);
+                   setIsCameraReady(false);
+               }
+           }, [photoCount, loadFaceModels, generatePhotoTip]); // Removed exposureCompensation from dependency array
+
+           useEffect(() => {
+               let cleanupFunction = () => {};
+
+               const initAppFlow = async () => {
+                   if (appState === 'camera') {
+                       if (!modelsInitialized) { 
+                           setLoadingMessage("載入人臉辨識模型中...");
+                           const success = await loadFaceModels(); 
+                           if (!success) {
+                               return; 
+                           }
+                       } else if (cameraError) { 
+                           setLoadingMessage("錯誤: 載入人臉辨識模型失敗。請檢查網路連線。");
+                           return; 
+                       }
+
+                       if (modelsInitialized && !cameraError) {
+                           setLoadingMessage("啟動攝影機中..."); 
+                           startVideo(); 
+                           setLlmTip('');
+                           // Removed setIsFlashlightOn(false);
+                           setAnalysisResult('');
+                           setSummaryReport('');
+                           // Removed setExposureCompensation(0);
+                       }
+
+                       cleanupFunction = () => {
+                           if (videoRef.current && videoRef.current.srcObject) {
+                               videoRef.current.srcObject.getTracks().forEach(track => {
+                                   // Removed flashlight off logic
+                                   track.stop();
+                               });
+                               videoRef.current.srcObject = null;
+                           }
+                           if (faceDetectionIntervalRef.current) {
+                               clearInterval(faceDetectionIntervalRef.current);
+                               faceDetectionIntervalRef.current = null;
+                           }
+                           if (faceCanvasRef.current) {
+                               const ctx = faceCanvasRef.current.getContext('2d');
+                               ctx.clearRect(0, 0, faceCanvasRef.current.width, faceCanvasRef.current.height);
+                           }
+                           setIsCameraReady(false);
+                           setZoomLevel(1.0);
+                           setFocusPoint({ x: 50, y: 50, visible: false });
+                           // Removed setIsFlashlightOn(false);
+                           setFaceDetected(false);
+                           setFaceReadyForFrontPhoto(false);
+                           setGazeStraight(false);
+                           // Removed setShowTipModal(false);
+                       };
+                   } else {
+                       if (videoRef.current && videoRef.current.srcObject) {
+                           videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+                           videoRef.current.srcObject = null;
+                       }
+                       if (faceDetectionIntervalRef.current) {
+                           clearInterval(faceDetectionIntervalRef.current);
+                           faceDetectionIntervalRef.current = null;
+                       }
+                       if (faceCanvasRef.current) {
+                           const ctx = faceCanvasRef.current.getContext('2d');
+                           ctx.clearRect(0, 0, faceCanvasRef.current.width, faceCanvasRef.current.height);
+                       }
+                       setIsCameraReady(false);
+                       setZoomLevel(1.0);
+                       setFocusPoint({ x: 50, y: 50, visible: false });
+                       // Removed setIsFlashlightOn(false);
+                       setFaceDetected(false);
+                       setFaceReadyForFrontPhoto(false);
+                       setGazeStraight(false);
+                       // Removed setShowTipModal(false);
+                   }
+               };
+
+               initAppFlow();
+
+               return () => cleanupFunction();
+
+           }, [appState, loadFaceModels, startVideo, modelsInitialized, cameraError]); // Removed isFlashlightOn, supportsTorch from dependency array
+
+           const handleCapturePhoto = () => {
+               const canCapture = isCameraReady && (photoCount === 0 ? faceReadyForFrontPhoto : faceDetected);
+
+               if (videoRef.current && photoCanvasRef.current && canCapture) {
+                   if (faceDetectionIntervalRef.current) {
+                       clearInterval(faceDetectionIntervalRef.current);
+                       faceDetectionIntervalRef.current = null;
+                   }
+                   setFaceDetected(false); 
+                   setFaceReadyForFrontPhoto(false); 
+                   setGazeStraight(false);
+                   // Removed setShowTipModal(false);
+
+                   const video = videoRef.current;
+                   const photoCanvas = photoCanvasRef.current;
+                   photoCanvas.width = video.videoWidth;
+                   photoCanvas.height = video.videoHeight;
+                   const context = photoCanvas.getContext('2d');
+                   const scaledWidth = video.videoWidth / zoomLevel;
+                   const scaledHeight = video.videoHeight / zoomLevel;
+                   const offsetX = (video.videoWidth - scaledWidth) / 2;
+                   const offsetY = (video.videoHeight - scaledHeight) / 2;
+                   context.drawImage(video, offsetX, offsetY, scaledWidth, scaledHeight, 0, 0, photoCanvas.width, photoCanvas.height);
+                   const imageDataUrl = photoCanvas.toDataURL('image/jpeg', 1.0); // Set quality to 1.0
+                   setCapturedImages(prevImages => {
+                       const newImages = [...prevImages];
+                       newImages[photoCount] = imageDataUrl;
+                       setAppState('single_photo_preview');
+                       return newImages;
+                   });
+                   setAnalysisResult('');
+                   setSummaryReport('');
+               }
+           };
+
+           const handleDownloadPhoto = (imageDataUrl, index) => {
+               const now = new Date();
+               const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
+               const link = document.createElement('a');
+               link.href = imageDataUrl;
+               link.download = `勤美患者_${timestamp}_${photoAngleNames[index] || '照片'}.jpeg`;
+               document.body.appendChild(link);
+               link.click();
+               document.body.removeChild(link);
+           };
+
+           const handleRetakeCurrentPhoto = async () => {
+               setAppState('camera');
+               setLlmTip('');
+               setAnalysisResult('');
+               setSummaryReport('');
+               await generatePhotoTip(); // Generate tip for retaken photo
+               // Removed setShowTipModal(true); // Removed modal trigger
+           };
+
+           // New function to retake a single photo from the all photos preview page
+           const handleRetakeSinglePhoto = async (indexToRetake) => {
+               setPhotoCount(indexToRetake); // Set the photoCount to the index of the photo to retake
+               setAppState('camera'); // Switch back to camera state
+               setLlmTip(''); // Clear previous LLM tip
+               setAnalysisResult(''); // Clear previous analysis result
+               setSummaryReport(''); // Clear previous summary report
+               await generatePhotoTip(); // Generate a new tip for the specific angle being retaken
+               // Removed setShowTipModal(true); // Removed modal trigger
+           };
+
+           const handleContinueShooting = async () => {
+               const nextPhotoIndex = photoCount + 1;
+               if (nextPhotoIndex === MAX_PHOTOS) {
+                   setAppState('all_photos_preview');
+               } else {
+                   setPhotoCount(prevCount => prevCount + 1);
+                   setAppState('camera');
+                   await generatePhotoTip(); // Generate tip for next photo
+                   // Removed setShowTipModal(true); // Removed modal trigger
+               }
+               setLlmTip('');
+               setAnalysisResult('');
+               setSummaryReport('');
+           };
+           const handleRetakeAllPhotos = async () => {
+               setCapturedImages([]);
+               setPhotoCount(0);
+               setAppState('camera');
+               setAnalysisResult('');
+               setSummaryReport('');
+               await generatePhotoTip(); // Generate tip for first photo after retaking all
+               // Removed setShowTipModal(true); // Removed modal trigger
+           };
+           const handleZoomIn = () => setZoomLevel(prevZoom => Math.min(prevZoom + ZOOM_STEP, MAX_ZOOM));
+           const handleZoomOut = () => setZoomLevel(prevZoom => Math.max(prevZoom - ZOOM_STEP, MIN_ZOOM));
+           const handleFocusClick = async (e) => {
+                if (!videoRef.current || !isCameraReady || !videoRef.current.srcObject) return;
+               const videoElement = videoRef.current;
+               const rect = videoElement.getBoundingClientRect();
+               const x = e.clientX - rect.left;
+               const y = e.clientY - rect.top;
+               const focusX = (x / rect.width) * 100;
+               const focusY = (y / rect.height) * 100;
+               setFocusPoint({ x: focusX, y: focusY, visible: true });
+               setTimeout(() => setFocusPoint(prev => ({ ...prev, visible: false })), 2000); // Increased duration to 2000ms
+
+               const track = videoElement.srcObject.getVideoTracks()[0];
+               if (track && 'getCapabilities' in track) {
+                   const capabilities = track.getCapabilities();
+                   if (capabilities.focusMode) {
+                       try {
+                           const supportedFocusModes = capabilities.focusMode;
+                           let focusModeToSet = 'continuous';
+                           if (!supportedFocusModes.includes('continuous') && supportedModes.includes('single-shot')) {
+                               focusModeToSet = 'single-shot';
+                           }
+
+                           if (supportedFocusModes.includes(focusModeToSet)) {
+                               await track.applyConstraints({ advanced: [{ focusMode: focusModeToSet }] });
+                               console.log(`對焦模式設定為: ${focusModeToSet}`);
+                               if (focusModeToSet === 'continuous' && capabilities.pointsOfInterest) {
+                                   const normX = x / rect.width;
+                                   const normY = y / rect.height;
+                                   await track.applyConstraints({ advanced: [{ pointsOfInterest: [{ x: normX, y: normY }] }] });
+                                   console.log(`對焦點設定於: (${normX.toFixed(2)}, ${normY.toFixed(2)})`);
+                               }
+                           }
+                       } catch (err) { console.warn('設定對焦模式或對焦點失敗：', err); }
+                   } else {
+                       console.log('裝置不支援 focusMode 設定。');
+                   }
+               }
+           };
+           // Removed toggleFlashlight function
+           // Removed handleExposureChange function
+
+           const generatePhotoTip = useCallback(async () => {
+               setIsLlmLoading(true);
+               setLlmTip('');
+               let prompt = '';
+               if (photoCount < MAX_PHOTOS) {
+                   const currentAngle = photoAngleNames[photoCount];
+                   // Prompt for a general tip relevant to the current photo angle
+                   prompt = `請為牙醫師提供一句簡潔的建議，關於如何拍攝患者的${currentAngle}臉部照片，以確保假牙製作所需的臉部輪廓和對稱性。如果需要注意光線或對焦，也請一併提示。請直接提供建議，不要有額外說明，字數限制在30字內。`;
+               } else {
+                   prompt = "所有照片已拍攝完成。"; // Should not happen if button disabled
+                   setIsLlmLoading(false);
+                   return;
+               }
+               try {
+                   let chatHistory = [];
+                   chatHistory.push({ role: "user", parts: [{ text: prompt }] });
+                   const payload = { contents: chatHistory };
+                   const apiKey = "";
+                   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+                   const response = await fetch(apiUrl, {
+                       method: 'POST',
+                       headers: { 'Content-Type': 'application/json' },
+                       body: JSON.stringify(payload)
+                   });
+                   const result = await response.json();
+                   if (result.candidates && result.candidates.length > 0 &&
+                       result.candidates[0].content && result.candidates[0].content.parts &&
+                       result.candidates[0].content.parts.length > 0) {
+                       setLlmTip(result.candidates[0].content.parts[0].text);
+                   } else {
+                       setLlmTip("無法生成提示，請稍後再試。");
+                   }
+               } catch (error) {
+                   setLlmTip("生成提示時發生錯誤。");
+               } finally {
+                   setIsLlmLoading(false);
+               }
+           }, [photoCount, photoAngleNames]);
+
+           const handleAnalyzePhoto = useCallback(async (imageDataUrl) => {
+               setIsAnalysisLoading(true);
+               setAnalysisResult('');
+               const base64ImageData = imageDataUrl.split(',')[1];
+               let prompt = '';
+
+               // Adjust prompt based on photo angle for more relevant analysis
+               if (photoCount === 0) {
+                   prompt = `這張照片應該是患者的正面臉部照片。請分析照片是否為清晰的「正面臉部」照片，檢查臉部的中心對稱性、清晰度、光線、構圖以及患者的表情或姿勢。提供具體、簡潔的改進建議，字數限制在50字內。如果照片品質良好且是清晰的正面臉部，請給予肯定。`;
+               } else if (photoCount === 1) {
+                   prompt = `這張照片應該是患者的側面照片。請分析照片的清晰度、光線、構圖、咬合平面以及患者的表情或姿勢，確保側面輪廓對假牙製作的參考價值。提供具體、簡潔的改進建議，字數限制在50字內。如果照片品質良好，請給予肯定。`;
+               } else if (photoCount === 2) {
+                   prompt = `這張照片應該是患者的45度側面照片。請分析照片的清晰度、光線、構圖以及患者的表情或姿勢，輔助確認美觀及豐隆度。提供具體、簡潔的改進建議，字數限制在50字內。如果照片品質良好，請給予肯定。`;
+               }
+
+
+               try {
+                   const payload = {
+                       contents: [{ role: "user", parts: [{ text: prompt }, { inlineData: { mimeType: "image/jpeg", data: base64ImageData }}]}],
+                   };
+                   const apiKey = "";
+                   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+                   const response = await fetch(apiUrl, {
+                       method: 'POST',
+                       headers: { 'Content-Type': 'application/json' },
+                       body: JSON.stringify(payload)
+                   });
+                   const result = await response.json();
+                    if (result.candidates && result.candidates.length > 0 &&
+                       result.candidates[0].content && result.candidates[0].content.parts &&
+                       result.candidates[0].content.parts.length > 0) {
+                       setAnalysisResult(result.candidates[0].content.parts[0].text);
+                   } else {
+                       setAnalysisResult("無法分析照片品質，請稍後再試。");
+                   }
+               } catch (error) {
+                   setAnalysisResult("分析照片時發生錯誤。");
+               } finally {
+                   setIsAnalysisLoading(false);
+               }
+           }, [photoCount]);
+
+           const handleGenerateSummaryReport = useCallback(async () => {
+               setIsSummaryLoading(true);
+               setSummaryReport('');
+               const parts = [];
+               parts.push({ text: `請根據這三張患者的臉部照片（分別為${photoAngleNames.join('、')}），為牙醫師生成一份簡潔的綜合報告，重點放在與假牙製作相關的面部輪廓、對稱性以及任何顯著特徵。請直接提供報告內容，不要有額外說明，字數限制在80字内。` });
+               capturedImages.forEach((imageDataUrl) => {
+                   parts.push({ inlineData: { mimeType: "image/jpeg", data: imageDataUrl.split(',')[1] }});
+               });
+               try {
+                   const payload = { contents: [{ role: "user", parts: parts }] };
+                   const apiKey = "";
+                   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+                   const response = await fetch(apiUrl, {
+                       method: 'POST',
+                       headers: { 'Content-Type': 'application/json' },
+                       body: JSON.stringify(payload)
+                   });
+                   const result = await response.json();
+                   if (result.candidates && result.candidates.length > 0 &&
+                       result.candidates[0].content && result.candidates[0].content.parts &&
+                       result.candidates[0].content.parts.length > 0) {
+                       setSummaryReport(result.candidates[0].content.parts[0].text);
+                   } else {
+                       setSummaryReport("無法生成綜合報告，請稍後再試。");
+                   }
+               } catch (error) {
+                   setSummaryReport("生成綜合報告時發生錯誤。");
+               } finally {
+                   setIsSummaryLoading(false);
+               }
+           }, [capturedImages, photoAngleNames]);
+
+           return (
+               <div className={`min-h-screen bg-gradient-to-br from-stone-100 to-stone-200 flex items-center justify-center ${appState === 'camera' ? 'p-0' : 'p-4'} font-inter text-gray-800`}>
+                   <div className={`bg-white shadow-xl ${appState === 'camera' ? 'p-0 w-full h-screen rounded-none' : 'p-6 md:p-8 w-full max-w-4xl rounded-2xl'} border border-blue-200`}>
+                       {appState !== 'intro' && ( /* 首頁按鈕 */
+                           <div className="absolute top-4 right-4 z-20">
+                               <button onClick={() => setAppState('intro')} className="p-3 bg-blue-500 text-white rounded-full shadow-lg hover:bg-blue-600 transition-colors duration-200 flex items-center justify-center text-sm">
+                                   <i className="fas fa-home mr-2"></i> 首頁
+                               </button>
+                           </div>
+                       )}
+
+                       {appState === 'intro' && ( /* 介紹介面 */
+                           <div className="relative w-full h-full min-h-[600px] flex flex-col items-center justify-center p-6 md:p-8 overflow-hidden">
+                               <h1 className="text-4xl font-extrabold text-blue-800 mb-6 text-center">
+                                   <i className="fas fa-tooth mr-3 text-blue-600"></i>勤美患者拍照工具
+                               </h1>
+                               <p className="text-lg text-gray-700 mb-6 max-w-2xl mx-auto leading-relaxed text-center">
+                                   此工具旨在協助牙醫師快速、便捷地拍攝患者的臉部照片，<br/>
+                                   這些照片將作為勤美技師製作假牙時的重要參考依據。<br/><br/>
+                                   本次操作將引導您拍攝3個方向：<br/>
+                                   <span className="font-bold text-2xl text-red-600 flex items-center justify-center gap-4">
+                                       正面、側面、側面45°
+                                   </span><br/>
+                                   請依照提示操作，感謝您的配合！
+                               </p>
+                               <button onClick={() => setAppState('camera')} className="px-12 py-5 bg-blue-600 text-white rounded-full font-bold text-2xl shadow-lg hover:bg-blue-700 transition-all duration-300 transform hover:scale-105 active:scale-95 z-10 mt-8">
+                                   <i className="fas fa-camera mr-3"></i>開始拍照
+                               </button>
+                               <p className="mt-8 text-center text-xs text-gray-500">
+                                   此軟體為測試版本，可能因手機型號差異而無法正常運作。若您遇到任何問題，請隨時與我們聯繫，以便我們進行優化與修正。感謝您的理解與支持。
+                               </p>
+                               <p className="mt-2 text-base text-gray-600 text-center w-full">
+                                   ✨ 此軟體由 Google Gemini 協助製作
+                               </p>
+                           </div>
+                       )}
+
+                       {appState === 'camera' && (
+                           <div className="flex flex-col h-full w-full">
+                               <h2 className="text-2xl font-bold text-center text-blue-700 pt-4 mb-4">
+                                   <i className="fas fa-video mr-2"></i>拍照中
+                               </h2>
+                               <div className="mb-6 text-center"> 
+                                   <p className="text-xl font-bold text-blue-800 animate-pulse flex items-center justify-center">
+                                       請拍攝患者的 
+                                       <span className="text-red-600 flex items-center ml-2">
+                                           {photoAngleNames[photoCount]}
+                                       </span> 
+                                       臉部照片
+                                   </p>
+                                   {photoCount < MAX_PHOTOS && (
+                                       <p className="mt-2 text-sm text-gray-600 max-w-md mx-auto">
+                                           {photoNotes[photoCount]}
+                                       </p>
+                                   )}
+                               </div>
+                               
+                               <div
+                                   className="relative w-full flex-grow bg-gray-900 overflow-hidden border border-gray-300 flex items-center justify-center cursor-pointer video-container"
+                                   onClick={handleFocusClick}
+                               >
+                                   <div
+                                       className="absolute inset-0 flex items-center justify-center"
+                                       style={{
+                                           transform: `scale(${zoomLevel})`,
+                                           transformOrigin: 'center center',
+                                           width: '100%',
+                                           height: '100%',
+                                       }}
+                                   >
+                                       <video
+                                           ref={videoRef}
+                                           className="w-full h-full object-contain"
+                                           autoPlay
+                                           muted
+                                           playsInline
+                                       ></video>
+                                       
+                                       {/* Face overlay canvas (only for first photo) */}
+                                       {photoCount === 0 && (
+                                           <canvas ref={faceCanvasRef} className="face-overlay-canvas"></canvas>
+                                       )}
+                                       {/* For photoCount === 1 and 2, drawSideProfileGuideLines/drawFortyFiveDegreeGuideLines will be called but draws nothing */}
+                                       {(photoCount === 1 || photoCount === 2) && (
+                                            <canvas ref={faceCanvasRef} className="face-overlay-canvas"></canvas>
+                                       )}
+
+                                       {/* 輔助線：九宮格和正中央垂直線 */}
+                                       <div className="overlay-elements" style={{ zIndex: 10 }}>
+                                           {/* 九宮格格線 */}
+                                           <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none" style={{ zIndex: 11 }}>
+                                               {Array(9).fill(0).map((_, i) => (
+                                                   <div
+                                                       key={i}
+                                                       className="border border-white border-opacity-30"
+                                                       style={{
+                                                           borderTopWidth: i < 3 ? 0 : '1px',
+                                                           borderLeftWidth: i % 3 === 0 ? 0 : '1px',
+                                                       }}
+                                                   ></div>
+                                               ))}
+                                           </div>
+                                           {/* 正中央垂直線 */}
+                                           <div 
+                                               className="absolute top-0 bottom-0 left-1/2 w-px bg-white opacity-50"
+                                               style={{ transform: 'translateX(-50%)', zIndex: 12 }}
+                                           ></div>
+                                           {/* 正中央水平線 */}
+                                           <div
+                                               className="absolute left-0 right-0 top-1/2 h-px bg-white opacity-50"
+                                               style={{ transform: 'translateY(-50%)', zIndex: 12 }}
+                                           ></div>
+                                       </div>
+                                   </div>
+
+                                   {focusPoint.visible && ( /* 對焦點標記 */
+                                       <div
+                                           className="absolute w-12 h-12 border-4 border-yellow-400 rounded-full animate-ping-once"
+                                           style={{ left: `${focusPoint.x}%`, top: `${focusPoint.y}%`, transform: 'translate(-50%, -50%)', zIndex: 13 }}
+                                       ></div>
+                                   )}
+                                   {cameraError && ( /* 相機錯誤訊息 */
+                                       <div className="absolute inset-0 flex items-center justify-center bg-red-800 bg-opacity-90 text-white text-lg font-semibold p-4 text-center rounded-xl z-20">
+                                           {loadingMessage || "無法啟動後置攝影機。請確認您的裝置有後置鏡頭，並已允許瀏覽器使用攝影機。"}
+                                       </div>
+                                   )}
+                                   {!isCameraReady && !cameraError && ( /* 載入訊息 */
+                                       <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-70 text-white text-lg font-semibold p-4 text-center rounded-xl z-20">
+                                           {loadingMessage}
+                                       </div>
+                                   )}
+                               </div>
+
+                               {/* 人臉辨識狀態提示 */}
+                               {isCameraReady && !cameraError && (
+                                   <div className={`mt-4 text-center font-bold 
+                                       ${(photoCount === 0 && faceReadyForFrontPhoto) || (photoCount > 0 && faceDetected) ? 'text-green-500' : 'text-yellow-500'}`}>
+                                       {photoCount === 0 ?
+                                           (!faceDetected ? '偵測人臉中... 請將人臉置於取景器中。' : // No face detected
+                                            (!gazeStraight ? '請患者直視鏡頭。' : // Face detected, but not looking straight
+                                             (!faceReadyForFrontPhoto ? '請將人臉正面置中並確保輪廓完整露出。' : '✅ 正面人臉已就緒，可以拍照！') // Face detected, looking straight, but not centered or contour incomplete
+                                            )
+                                           ) :
+                                           (faceDetected ? '✅ 已偵測到人臉，可以拍照！' : '偵測人臉中... 請將人臉置於取景器中。') // For other photos
+                                       }
+                                   </div>
+                               )}
+                               
+                               {/* LLM Tip Display - now always visible at the bottom, prominent */}
+                               {llmTip && (
+                                   <div className="mt-4 p-4 bg-purple-100 text-purple-800 rounded-lg shadow-md text-xl font-bold text-center max-w-lg mx-auto">
+                                       {llmTip}
+                                   </div>
+                               )}
+
+                               {/* 按鈕群組橫向排列，且縮小 */}
+                               <div className="flex flex-wrap items-center justify-center gap-3 py-6">
+                                   <button onClick={handleZoomOut} disabled={!isCameraReady || cameraError || zoomLevel <= MIN_ZOOM || photoCount === MAX_PHOTOS} className={`px-4 py-2 rounded-full text-white font-bold text-base shadow-lg transform transition-all duration-300 ${isCameraReady && !cameraError && zoomLevel > MIN_ZOOM && photoCount < MAX_PHOTOS ? 'bg-blue-500 hover:bg-blue-600 active:scale-95' : 'bg-gray-400 cursor-not-allowed'}`}>
+                                       <i className="fas fa-minus mr-1"></i> 縮小
+                                   </button>
+                                   <button 
+                                       onClick={handleCapturePhoto} 
+                                       disabled={!isCameraReady || cameraError || photoCount === MAX_PHOTOS || (photoCount === 0 ? !faceReadyForFrontPhoto : !faceDetected)} // 根據照片類型判斷是否啟用
+                                       className={`px-5 py-2 rounded-full text-white font-bold text-base shadow-lg transform transition-all duration-300 
+                                           ${(isCameraReady && !cameraError && photoCount < MAX_PHOTOS && ((photoCount === 0 && faceReadyForFrontPhoto) || (photoCount > 0 && faceDetected))) ? 'bg-green-500 hover:bg-green-600 active:scale-95' : 'bg-gray-400 cursor-not-allowed'}`}
+                                   >
+                                       <i className="fas fa-camera mr-1"></i> 拍照 ({photoCount + 1}/{MAX_PHOTOS})
+                                   </button>
+                                   <button onClick={handleZoomIn} disabled={!isCameraReady || cameraError || zoomLevel >= MAX_ZOOM || photoCount === MAX_PHOTOS} className={`px-4 py-2 rounded-full text-white font-bold text-base shadow-lg transform transition-all duration-300 ${isCameraReady && !cameraError && zoomLevel < MAX_ZOOM && photoCount < MAX_PHOTOS ? 'bg-blue-500 hover:bg-blue-600 active:scale-95' : 'bg-gray-400 cursor-not-allowed'}`}>
+                                       <i className="fas fa-plus mr-1"></i> 放大
+                                   </button>
+                               </div>
+                               <p className="text-sm text-gray-500 pb-4 text-center">
+                                   請將患者臉部對準畫面中的九宮格及中央線。
+                               </p>
+                               {/* Removed flashlight button and exposure compensation control */}
+
+                           </div>
+                       )}
+
+                       {appState === 'single_photo_preview' && capturedImages.length > 0 && ( /* 單張照片預覽 */
+                          <div className="flex flex-col h-full w-full p-4">
+                               <h2 className="text-2xl font-bold text-center text-blue-700 pt-4 mb-4">
+                                   <i className="fas fa-image mr-2"></i>照片預覽 (第 {photoCount + 1} 張)
+                               </h2>
+                               <div className="flex-grow flex items-center justify-center bg-gray-100 rounded-xl shadow-inner border border-gray-200 overflow-hidden mb-6">
+                                   <img src={capturedImages[photoCount]} alt={`Captured Face ${photoCount + 1}`} className="w-full h-full object-contain rounded-lg"/>
+                               </div>
+                               {/* 分析照片品質按鈕移動到重新拍攝按鈕上方 */}
+                               <div className="mt-6 text-center mb-6">
+                                   <button onClick={() => handleAnalyzePhoto(capturedImages[photoCount])} disabled={isAnalysisLoading} className={`px-6 py-2 rounded-full text-white font-bold text-sm shadow-md transform transition-all duration-300 ${!isAnalysisLoading ? 'bg-indigo-600 hover:bg-indigo-700 active:scale-95' : 'bg-gray-400 cursor-not-allowed'}`}>
+                                       {isAnalysisLoading ? '分析中...' : '分析照片品質 ✨'}
+                                   </button>
+                                   {analysisResult && <div className="mt-3 p-3 bg-indigo-50 text-indigo-800 rounded-lg shadow-sm text-sm max-w-md mx-auto">{analysisResult}</div>}
+                               </div>
+                               <div className="flex justify-center space-x-4 py-4">
+                                   <button onClick={handleRetakeCurrentPhoto} className="px-6 py-2 bg-red-500 text-white rounded-full hover:bg-red-600 transition-colors duration-200 shadow-md text-base flex items-center justify-center">
+                                       <i className="fas fa-redo-alt mr-2"></i> 重新拍攝此張
+                                   </button>
+                                   <button onClick={handleContinueShooting} className="px-6 py-2 bg-green-600 text-white rounded-full hover:bg-green-700 transition-colors duration-200 shadow-md text-base flex items-center justify-center">
+                                       <i className="fas fa-arrow-right mr-2"></i> 
+                                       {photoCount + 1 === MAX_PHOTOS ? '完成拍攝' : '繼續拍攝'}
+                                   </button>
+                               </div>
+                           </div>
+                       )}
+
+                       {appState === 'all_photos_preview' && ( /* 所有照片預覽 */
+                           <div className="mt-8">
+                               <h2 className="text-2xl font-bold text-center text-blue-700 mb-4">
+                                   <i className="fas fa-images mr-2"></i>所有照片預覽
+                               </h2>
+                               <div className="bg-gray-100 p-4 rounded-xl shadow-inner border border-gray-200">
+                                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                                       {capturedImages.map((image, index) => {
+                                           return (
+                                               <div key={index} className="relative bg-white rounded-lg shadow-md overflow-hidden border border-gray-300">
+                                                   <img src={image} alt={`Captured Face ${index + 1}`} className="w-full h-auto object-cover"/>
+                                                   <div className="absolute top-2 left-2 bg-blue-600 text-white text-xs font-bold px-2 py-1 rounded-full flex items-center">
+                                                       第 {index + 1} 張 ({photoAngleNames[index]})
+                                                   </div>
+                                                   <div className="p-3 text-center">
+                                                       <button onClick={() => handleDownloadPhoto(image, index)} className="px-4 py-2 bg-blue-600 text-white rounded-full hover:bg-blue-700 transition-colors duration-200 shadow-md text-sm flex items-center justify-center mx-auto mb-2">
+                                                           <i className="fas fa-download mr-2"></i> 下載
+                                                       </button>
+                                                       <button onClick={() => handleRetakeSinglePhoto(index)} className="px-4 py-2 bg-yellow-500 text-white rounded-full hover:bg-yellow-600 transition-colors duration-200 shadow-md text-sm flex items-center justify-center mx-auto">
+                                                           <i className="fas fa-redo-alt mr-2"></i> 單獨重新拍照
+                                                       </button>
+                                                   </div>
+                                               </div>
+                                           );
+                                       })}
+                                   </div>
+                                   <div className="flex justify-center mt-6">
+                                       <button onClick={handleRetakeAllPhotos} className="px-6 py-2 bg-gray-500 text-white rounded-full hover:bg-gray-600 transition-colors duration-200 shadow-md text-base flex items-center justify-center">
+                                           <i className="fas fa-redo-alt mr-2"></i> 重新拍照
+                                       </button>
+                                   </div>
+                                   <p className="text-center text-sm text-gray-600 mt-4">
+                                       您可以下載單張照片，或選擇重新拍攝所有照片。
+                                   </p>
+                                   <div className="mt-6 text-center">
+                                       <button onClick={handleGenerateSummaryReport} disabled={isSummaryLoading || capturedImages.length !== MAX_PHOTOS} className={`px-6 py-2 rounded-full text-white font-bold text-sm shadow-md transform transition-all duration-300 ${!isSummaryLoading && capturedImages.length === MAX_PHOTOS ? 'bg-teal-600 hover:bg-teal-700 active:scale-95' : 'bg-gray-400 cursor-not-allowed'}`}>
+                                           {isSummaryLoading ? '生成報告中...' : '生成綜合報告 ✨'}
+                                       </button>
+                                       {summaryReport && <div className="mt-3 p-3 bg-teal-50 text-teal-800 rounded-lg shadow-sm text-sm max-w-md mx-auto">
+                                          {summaryReport}
+                                       </div>}
+                                   </div>
+                                   <p className="mt-6 text-center text-xs text-gray-500">
+                                       此軟體為初版，可能無法適用於所有手機型號。若您在使用上遇到任何問題，請隨時與我們聯繫，以便我們進行優化與修正。感謝您的理解與支持。
+                                   </p>
+                               </div>
+                           </div>
+                       )}
+                       <canvas ref={photoCanvasRef} className="hidden"></canvas>
+                   </div>
+               </div>
+           );
+       }
+
+       const container = document.getElementById('root');
+       const root = createRoot(container);
+       root.render(<App />);
+   </script>
+</body>
+</html>
