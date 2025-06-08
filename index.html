@@ -3,7 +3,7 @@
 <head>
    <meta charset="UTF-8">
    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-   <title>勤美患者拍照工具 - 臉部辨識輔助 v33</title>
+   <title>勤美患者拍照工具.測試版</title>
 
    <script src="https://cdn.tailwindcss.com"></script>
    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
@@ -623,7 +623,7 @@
                        try {
                            const supportedFocusModes = capabilities.focusMode;
                            let focusModeToSet = 'continuous';
-                           if (!supportedFocusModes.includes('continuous') && supportedModes.includes('single-shot')) {
+                           if (!supportedModes.includes('continuous') && supportedFocusModes.includes('single-shot')) {
                                focusModeToSet = 'single-shot';
                            }
 
