@@ -13,7 +13,8 @@
    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-   <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+   <!-- Updated Face-API.js CDN to unpkg.com for better reliability -->
+   <script src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
 
    <style>
        body {
@@ -27,7 +28,7 @@
        .animate-ping-once {
            animation: ping-once 1s cubic-bezier(0, 0, 0.2, 1) forwards;
        }
-       /* 讓 video-container 佔滿整個可用空間，並調整高度 */
+       /* Updated video-container for better aspect ratio handling */
        .video-container {
            width: 100%;
            height: 70vh; /* 調整高度，使其看起來更長 */
@@ -36,13 +37,13 @@
            align-items: center;
            justify-content: center;
            overflow: hidden;
-           position: relative; /* Essential for overlaying canvas */
+           position: relative;
+           background-color: #000; /* Black background for un-filled areas */
        }
-       /* 讓 video 元素在容器內填滿，並保持比例 */
        .video-container video {
            width: 100%;
            height: 100%;
-           object-fit: contain; /* 保持比例，如果容器不夠大，會出現黑邊 */
+           object-fit: contain; /* Keeps aspect ratio, shows full video, may have black bars */
        }
        .overlay-elements {
            position: absolute;
@@ -55,11 +56,73 @@
            align-items: center;
            justify-content: center;
        }
-       /* Removed modal styles */
+       /* Modal Styles */
+       .modal-overlay {
+           position: fixed;
+           top: 0;
+           left: 0;
+           right: 0;
+           bottom: 0;
+           background-color: rgba(0, 0, 0, 0.7);
+           display: flex;
+           align-items: center;
+           justify-content: center;
+           z-index: 100;
+       }
+       .modal-content {
+           background-color: white;
+           padding: 2.5rem; /* Increased padding */
+           border-radius: 1.5rem; /* More rounded */
+           box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+           max-width: 90%;
+           width: 500px; /* Max width for consistency */
+           text-align: center;
+           position: relative;
+           animation: fadeIn 0.3s ease-out;
+       }
+       @keyframes fadeIn {
+           from { opacity: 0; transform: scale(0.9); }
+           to { opacity: 1; transform: scale(1); }
+       }
+       .modal-title {
+           font-size: 2.25rem; /* Larger title */
+           font-weight: bold;
+           color: #1a202c; /* Darker text */
+           margin-bottom: 1.5rem;
+       }
+       /* Ensure modal-message default styles don't override the span within */
+       .modal-message {
+           font-size: 1.25rem; /* Larger message */
+           color: #4a5568; /* Slightly lighter text */
+           line-height: 1.8; /* Improved readability */
+           margin-bottom: 2rem;
+       }
+       .modal-close-button {
+           background-color: #4299e1; /* Blue button */
+           color: white;
+           padding: 0.75rem 2rem; /* More padding */
+           border-radius: 9999px; /* Full rounded */
+           font-size: 1.125rem; /* Larger font */
+           font-weight: bold;
+           border: none;
+           cursor: pointer;
+           transition: background-color 0.3s ease, transform 0.2s ease;
+           box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+       }
+       .modal-close-button:hover {
+           background-color: #3182ce; /* Darker blue on hover */
+           transform: translateY(-2px); /* Slight lift */
+       }
+       .modal-close-button:active {
+           transform: translateY(0); /* Press effect */
+           box-shadow: none;
+       }
        .face-overlay-canvas {
            position: absolute;
            top: 0;
            left: 0;
+           width: 100%; /* Make canvas take full width of its parent (.video-container) */
+           height: 100%; /* Make canvas take full height of its parent (.video-container) */
            z-index: 15; /* Higher than grid lines */
        }
    </style>
@@ -110,52 +173,65 @@
            const canvasWidth = canvas.width;
            const canvasHeight = canvas.height;
 
-           // Change color based on ready status
+           // 縮小比例因子 (0.8 代表縮小到原始的 80%)
+           const scaleFactor = 0.8; 
+
            ctx.strokeStyle = isReady ? 'rgba(255, 255, 255, 0.7)' : 'rgba(255, 255, 0, 0.7)'; // White or Yellow
-           ctx.lineWidth = 2;
+           // 修正輪廓線模糊問題：將 lineWidth 增加到 3 像素，使其更清晰
+           ctx.lineWidth = 3; 
            ctx.lineJoin = 'round';
            ctx.setLineDash([8, 8]); // Dashed lines (8px dash, 8px gap)
 
            const centerX = canvasWidth / 2;
            const centerY = canvasHeight / 2;
            
-           const headScale = 0.55; 
-           const shoulderScale = 0.8; 
-           const neckScale = 0.45; 
+           // 原始比例參數 (這些參數是基於人體工學的相對比例，會被整體縮放)
+           const baseHeadScale = 0.55; 
+           const baseShoulderScale = 0.8; 
+           const baseNeckFactor = 0.45; 
+           const baseHeadHeightFactor = 0.05; // Additional height factor for head shape
+           const baseBodyHeightFactor = 0.22; // Height factor for lower body/shoulder part
+           const baseVerticalHeadOffsetFactor = 0.65; // Factor for head top Y position relative to head height
 
-           const headWidth = canvasWidth * headScale;
-           const headHeight = canvasHeight * (headScale + 0.05); 
-           const shoulderWidth = canvasWidth * shoulderScale;
-           const neckWidth = headWidth * neckScale;
-           const neckHeight = headHeight * 0.15;
+           // 應用縮放因子
+           const headWidth = canvasWidth * baseHeadScale * scaleFactor;
+           const headHeight = canvasHeight * (baseHeadScale + baseHeadHeightFactor) * scaleFactor; 
+           const shoulderWidth = canvasWidth * baseShoulderScale * scaleFactor;
+           const neckWidth = headWidth * baseNeckFactor;
+           const neckHeight = headHeight * 0.15; // 相對於縮放後的頭部高度，所以會自動縮放
 
-           const headTopY = centerY - headHeight * 0.65; 
+           // 調整頭部頂部 Y 座標以確保縮小後仍居中
+           const headTopY = centerY - (headHeight * baseVerticalHeadOffsetFactor);
+           
            const headBottomY = headTopY + headHeight;
            const neckTopY = headBottomY;
            const neckBottomY = neckTopY + neckHeight;
            const shoulderTopY = neckBottomY;
-           const shoulderBottomY = shoulderTopY + canvasHeight * 0.22; 
+           const shoulderBottomY = shoulderTopY + (canvasHeight * baseBodyHeightFactor * scaleFactor); 
 
            ctx.beginPath();
+           // 頭部圓弧
            ctx.arc(centerX, headTopY + headWidth * 0.5, headWidth * 0.5, Math.PI, 0, false);
+           // 頭部到頸部
            ctx.lineTo(centerX + headWidth * 0.5, headBottomY); 
            ctx.lineTo(centerX + neckWidth / 2, neckBottomY); 
-           ctx.bezierCurveTo(centerX + shoulderWidth * 0.3, shoulderTopY + canvasHeight * 0.05, 
+           // 右肩曲線
+           ctx.bezierCurveTo(centerX + shoulderWidth * 0.3, shoulderTopY + (canvasHeight * 0.05 * scaleFactor), 
                              centerX + shoulderWidth * 0.4, shoulderBottomY,                     
                              centerX + shoulderWidth / 2, shoulderBottomY);                       
            ctx.lineTo(centerX - shoulderWidth / 2, shoulderBottomY);
+           // 左肩曲線
            ctx.bezierCurveTo(centerX - shoulderWidth * 0.4, shoulderBottomY,                     
-                             centerX - shoulderWidth * 0.3, shoulderTopY + canvasHeight * 0.05, 
+                             centerX - shoulderWidth * 0.3, shoulderTopY + (canvasHeight * 0.05 * scaleFactor), 
                              centerX - neckWidth / 2, neckBottomY);                               
            ctx.lineTo(centerX - headWidth * 0.5, headBottomY); 
            ctx.closePath(); 
            ctx.stroke();
 
-           // --- Draw Facial Features ---
-           // Eyes (as two prominent ovals/rectangles, like glasses)
+           // --- 繪製臉部特徵 (會自動隨頭部大小縮放) ---
            const eyeWidth = headWidth * 0.15;
            const eyeHeight = headHeight * 0.08;
-           const eyeY = centerY - headHeight * 0.25; 
+           const eyeY = headTopY + (headHeight * 0.25); // 相對於縮放後的頭部位置
 
            ctx.beginPath();
            ctx.ellipse(centerX - headWidth * 0.2, eyeY, eyeWidth, eyeHeight, 0, 0, Math.PI * 2);
@@ -165,7 +241,6 @@
            ctx.ellipse(centerX + headWidth * 0.2, eyeY, eyeWidth, eyeHeight, 0, 0, Math.PI * 2);
            ctx.stroke();
 
-           // Nose (simple triangle shape)
            const noseTopY = eyeY + eyeHeight * 1.5; 
            const noseBottomY = noseTopY + headHeight * 0.1; 
            const noseBaseWidth = headWidth * 0.08;
@@ -177,10 +252,9 @@
            ctx.closePath();
            ctx.stroke();
 
-           // Ears (simplified outer contour)
            const earHorizontalOffset = headWidth * 0.53; 
-           const earTopY = centerY - headHeight * 0.35; 
-           const earBottomY = centerY + headHeight * 0.05; 
+           const earTopY = headTopY + (headHeight * 0.2); 
+           const earBottomY = headTopY + (headHeight * 0.7); 
 
            ctx.beginPath();
            ctx.moveTo(centerX - earHorizontalOffset, earTopY);
@@ -215,12 +289,30 @@
            // No specific lines drawn here.
        };
 
+       // Modal Component
+       const Modal = ({ title, message, isVisible, onClose }) => {
+           if (!isVisible) return null;
+
+           return (
+               <div className="modal-overlay">
+                   <div className="modal-content">
+                       <h3 className="modal-title">{title}</h3>
+                       {/* Using dangerouslySetInnerHTML to render HTML content */}
+                       <p className="modal-message" dangerouslySetInnerHTML={{ __html: message }}></p>
+                       <button onClick={onClose} className="modal-close-button">
+                           我明白了
+                       </button>
+                   </div>
+               </div>
+           );
+       };
 
        function App() {
            const videoRef = useRef(null);
            const photoCanvasRef = useRef(null);
            const faceCanvasRef = useRef(null); // Ref for face overlay canvas
            const faceDetectionIntervalRef = useRef(null); 
+           const videoContainerRef = useRef(null); // New ref for video container
 
            const [appState, setAppState] = useState('intro');
            const [loadingMessage, setLoadingMessage] = useState("載入攝影機中...");
@@ -243,26 +335,30 @@
            const [isAnalysisLoading, setIsAnalysisLoading] = useState(false);
            const [summaryReport, setSummaryReport] = useState('');
            const [isSummaryLoading, setIsSummaryLoading] = useState(false);
-           // Removed isFlashlightOn and supportsTorch states
-           // Removed exposureCompensation state
-
+           
            const [faceDetected, setFaceDetected] = useState(false); // General face detected state (anywhere in frame)
            const [faceReadyForFrontPhoto, setFaceReadyForFrontPhoto] = useState(false); // Specific for frontal photo (centered + contour + gaze)
            const [gazeStraight, setGazeStraight] = useState(false); // New state for eye gaze for frontal photo
-           // Removed showTipModal state
+
+           // New state for modal visibility and content
+           const [showModal, setShowModal] = useState(false);
+           const [modalTitle, setModalTitle] = useState('');
+           const [modalMessage, setModalMessage] = useState('');
+
 
            const photoAngleNames = ["正面", "側面", "側面45°"];
+           // Updated photoNotes with red reminder text and HTML tags for styling
            const photoNotes = [
-               "請將患者臉部對準畫面中央，確保正面對稱、耳朵與臉頰輪廓完整露出，並請患者直視鏡頭。", 
-               "請將患者側面輪廓對準畫面中央，方便確認咬合平面及嘴唇豐隆度。", 
-               "請將患者45度側面輪廓對準畫面中央，輔助確認美觀及豐隆度。"
+               `<span class="text-red-600 font-bold">請站於患者正對面再做拍攝</span><br/><br/>請將患者臉部對準畫面中央，確保正面對稱、耳朵與臉頰輪廓完整露出，並請患者直視鏡頭。`, 
+               `<span class="text-red-600 font-bold">請站於患者正側面再做拍攝</span><br/><br/>請將患者側面輪廓對準畫面中央，方便確認咬合平面及嘴唇豐隆度。`, 
+               `<span class="text-red-600 font-bold">請站於患者側方45°再做拍攝</span><br/><br/>請將患者45度側面輪廓對準畫面中央，輔助確認美觀及豐隆度。`
            ];
 
            // Function to load face-api.js models
            const loadFaceModels = useCallback(async () => {
                try {
                    setLoadingMessage("載入人臉辨識模型中...");
-                   // Standardize to cdn.jsdelivr.net for all models
+                   // Use raw.githubusercontent.com for robustness
                    const weightsPath = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/';
                    
                    await faceapi.nets.tinyFaceDetector.loadFromUri(weightsPath);
@@ -303,7 +399,7 @@
                                setLoadingMessage("攝影機已啟動。");
                                setIsCameraReady(true);
 
-                               // Generate tip when camera is ready (no modal now)
+                               // Generate tip when camera is ready
                                await generatePhotoTip();
 
                                // Clear previous interval and start new face detection
@@ -318,12 +414,14 @@
                                        let currentGazeStraight = false;
 
                                        const videoElement = videoRef.current;
+                                       // It's important to use the actual video dimensions for calculations, not CSS computed ones.
                                        const videoWidth = videoElement.videoWidth;
                                        const videoHeight = videoElement.videoHeight;
                                        
                                        // Setup face canvas for drawing
-                                       if (faceCanvasRef.current) {
+                                       if (faceCanvasRef.current && videoContainerRef.current) {
                                            // Set canvas dimensions to match video element's displayed size for accurate overlay
+                                           // Use videoElement.offsetWidth/Height as the canvas needs to match the displayed video
                                            faceCanvasRef.current.width = videoElement.offsetWidth;
                                            faceCanvasRef.current.height = videoElement.offsetHeight;
                                            const ctx = faceCanvasRef.current.getContext('2d');
@@ -401,8 +499,6 @@
                                    if (settings.frameRate) {
                                      console.log(`取得幀率: ${settings.frameRate} FPS`);
                                    }
-                                   // Removed torch support check
-                                   // Removed exposure compensation application
                                }
                            } catch (playError) {
                                console.error("攝影機播放失敗:", playError);
@@ -431,13 +527,15 @@
                    setCameraError(true);
                    setIsCameraReady(false);
                }
-           }, [photoCount, loadFaceModels, generatePhotoTip]); // Removed exposureCompensation from dependency array
+           }, [photoCount, loadFaceModels, generatePhotoTip]);
 
+           // Main effect for app state changes, ensuring camera/models are ready
            useEffect(() => {
                let cleanupFunction = () => {};
 
                const initAppFlow = async () => {
-                   if (appState === 'camera') {
+                   // Only proceed to camera if appState is 'camera' AND modal is NOT shown
+                   if (appState === 'camera' && !showModal) { 
                        if (!modelsInitialized) { 
                            setLoadingMessage("載入人臉辨識模型中...");
                            const success = await loadFaceModels(); 
@@ -453,16 +551,13 @@
                            setLoadingMessage("啟動攝影機中..."); 
                            startVideo(); 
                            setLlmTip('');
-                           // Removed setIsFlashlightOn(false);
                            setAnalysisResult('');
                            setSummaryReport('');
-                           // Removed setExposureCompensation(0);
                        }
 
                        cleanupFunction = () => {
                            if (videoRef.current && videoRef.current.srcObject) {
                                videoRef.current.srcObject.getTracks().forEach(track => {
-                                   // Removed flashlight off logic
                                    track.stop();
                                });
                                videoRef.current.srcObject = null;
@@ -478,13 +573,11 @@
                            setIsCameraReady(false);
                            setZoomLevel(1.0);
                            setFocusPoint({ x: 50, y: 50, visible: false });
-                           // Removed setIsFlashlightOn(false);
                            setFaceDetected(false);
                            setFaceReadyForFrontPhoto(false);
                            setGazeStraight(false);
-                           // Removed setShowTipModal(false);
                        };
-                   } else {
+                   } else if (appState !== 'camera') { // When not in camera state, always clean up camera
                        if (videoRef.current && videoRef.current.srcObject) {
                            videoRef.current.srcObject.getTracks().forEach(track => track.stop());
                            videoRef.current.srcObject = null;
@@ -500,11 +593,9 @@
                        setIsCameraReady(false);
                        setZoomLevel(1.0);
                        setFocusPoint({ x: 50, y: 50, visible: false });
-                       // Removed setIsFlashlightOn(false);
                        setFaceDetected(false);
                        setFaceReadyForFrontPhoto(false);
                        setGazeStraight(false);
-                       // Removed setShowTipModal(false);
                    }
                };
 
@@ -512,7 +603,14 @@
 
                return () => cleanupFunction();
 
-           }, [appState, loadFaceModels, startVideo, modelsInitialized, cameraError]); // Removed isFlashlightOn, supportsTorch from dependency array
+           }, [appState, loadFaceModels, startVideo, modelsInitialized, cameraError, showModal]);
+
+           // Effect to automatically generate summary report when all photos are taken and appState is 'all_photos_preview'
+           useEffect(() => {
+               if (appState === 'all_photos_preview' && capturedImages.length === MAX_PHOTOS) {
+                   handleGenerateSummaryReport();
+               }
+           }, [appState, capturedImages, MAX_PHOTOS, handleGenerateSummaryReport]);
 
            const handleCapturePhoto = () => {
                const canCapture = isCameraReady && (photoCount === 0 ? faceReadyForFrontPhoto : faceDetected);
@@ -525,7 +623,6 @@
                    setFaceDetected(false); 
                    setFaceReadyForFrontPhoto(false); 
                    setGazeStraight(false);
-                   // Removed setShowTipModal(false);
 
                    const video = videoRef.current;
                    const photoCanvas = photoCanvasRef.current;
@@ -549,6 +646,42 @@
                }
            };
 
+           // New function to handle unconditional photo capture for testing
+           const handleTestCapturePhoto = () => {
+               if (videoRef.current && photoCanvasRef.current && isCameraReady) { // Only check camera readiness, not face detection
+                   if (faceDetectionIntervalRef.current) {
+                       clearInterval(faceDetectionIntervalRef.current);
+                       faceDetectionIntervalRef.current = null;
+                   }
+                   setFaceDetected(false); // Reset face detection states
+                   setFaceReadyForFrontPhoto(false);
+                   setGazeStraight(false);
+
+                   const video = videoRef.current;
+                   const photoCanvas = photoCanvasRef.current;
+                   photoCanvas.width = video.videoWidth;
+                   photoCanvas.height = video.videoHeight;
+                   const context = photoCanvas.getContext('2d');
+                   const scaledWidth = video.videoWidth / zoomLevel;
+                   const scaledHeight = video.videoHeight / zoomLevel;
+                   const offsetX = (video.videoWidth - scaledWidth) / 2;
+                   const offsetY = (video.videoHeight - scaledHeight) / 2;
+                   context.drawImage(video, offsetX, offsetY, scaledWidth, scaledHeight, 0, 0, photoCanvas.width, photoCanvas.height);
+                   const imageDataUrl = photoCanvas.toDataURL('image/jpeg', 1.0); // Set quality to 1.0
+                   setCapturedImages(prevImages => {
+                       const newImages = [...prevImages];
+                       newImages[photoCount] = imageDataUrl;
+                       setAppState('single_photo_preview');
+                       return newImages;
+                   });
+                   setAnalysisResult('');
+                   setSummaryReport('');
+               } else {
+                   console.warn("Camera not ready for test capture.");
+               }
+           };
+
+
            const handleDownloadPhoto = (imageDataUrl, index) => {
                const now = new Date();
                const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
@@ -561,23 +694,19 @@
            };
 
            const handleRetakeCurrentPhoto = async () => {
-               setAppState('camera');
-               setLlmTip('');
-               setAnalysisResult('');
-               setSummaryReport('');
-               await generatePhotoTip(); // Generate tip for retaken photo
-               // Removed setShowTipModal(true); // Removed modal trigger
+               // Trigger modal before going to camera
+               setModalTitle(`重新拍攝 - ${photoAngleNames[photoCount]}`);
+               setModalMessage(photoNotes[photoCount]);
+               setShowModal(true);
            };
 
            // New function to retake a single photo from the all photos preview page
            const handleRetakeSinglePhoto = async (indexToRetake) => {
                setPhotoCount(indexToRetake); // Set the photoCount to the index of the photo to retake
-               setAppState('camera'); // Switch back to camera state
-               setLlmTip(''); // Clear previous LLM tip
-               setAnalysisResult(''); // Clear previous analysis result
-               setSummaryReport(''); // Clear previous summary report
-               await generatePhotoTip(); // Generate a new tip for the specific angle being retaken
-               // Removed setShowTipModal(true); // Removed modal trigger
+               // Trigger modal before going to camera
+               setModalTitle(`重新拍攝 - ${photoAngleNames[indexToRetake]}`);
+               setModalMessage(photoNotes[indexToRetake]);
+               setShowModal(true);
            };
 
            const handleContinueShooting = async () => {
@@ -586,23 +715,34 @@
                    setAppState('all_photos_preview');
                } else {
                    setPhotoCount(prevCount => prevCount + 1);
-                   setAppState('camera');
-                   await generatePhotoTip(); // Generate tip for next photo
-                   // Removed setShowTipModal(true); // Removed modal trigger
+                   // Trigger modal before going to camera
+                   setModalTitle(`拍攝 ${photoAngleNames[nextPhotoIndex]}`);
+                   setModalMessage(photoNotes[nextPhotoIndex]);
+                   setShowModal(true);
                }
                setLlmTip('');
                setAnalysisResult('');
                setSummaryReport('');
            };
+
            const handleRetakeAllPhotos = async () => {
                setCapturedImages([]);
                setPhotoCount(0);
-               setAppState('camera');
+               // Trigger modal before going to camera for the first photo
+               setModalTitle(`開始拍攝 - ${photoAngleNames[0]}`);
+               setModalMessage(photoNotes[0]);
+               setShowModal(true);
                setAnalysisResult('');
                setSummaryReport('');
-               await generatePhotoTip(); // Generate tip for first photo after retaking all
-               // Removed setShowTipModal(true); // Removed modal trigger
            };
+
+           // Function to transition from modal to camera
+           const handleCloseModalAndStartCamera = () => {
+               setShowModal(false);
+               setAppState('camera');
+               // Start video is handled by useEffect when appState becomes 'camera' and showModal is false
+           };
+
            const handleZoomIn = () => setZoomLevel(prevZoom => Math.min(prevZoom + ZOOM_STEP, MAX_ZOOM));
            const handleZoomOut = () => setZoomLevel(prevZoom => Math.max(prevZoom - ZOOM_STEP, MIN_ZOOM));
            const handleFocusClick = async (e) => {
@@ -623,7 +763,7 @@
                        try {
                            const supportedFocusModes = capabilities.focusMode;
                            let focusModeToSet = 'continuous';
-                           if (!supportedModes.includes('continuous') && supportedFocusModes.includes('single-shot')) {
+                           if (!supportedFocusModes.includes('continuous') && supportedFocusModes.includes('single-shot')) {
                                focusModeToSet = 'single-shot';
                            }
 
@@ -643,8 +783,6 @@
                    }
                }
            };
-           // Removed toggleFlashlight function
-           // Removed handleExposureChange function
 
            const generatePhotoTip = useCallback(async () => {
                setIsLlmLoading(true);
@@ -663,7 +801,7 @@
                    let chatHistory = [];
                    chatHistory.push({ role: "user", parts: [{ text: prompt }] });
                    const payload = { contents: chatHistory };
-                   const apiKey = "AIzaSyB9VFxFf9ttv_0tTkTvoQPPkvy2OLd3pv8";
+                   const apiKey = "AIzaSyB9VFxFf9ttv_0tTkTvoQPPkvy2OLd3pv8"; // If you want to use models other than gemini-2.0-flash or imagen-3.0-generate-002, provide an API key here. Otherwise, leave this as-is.
                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
                    const response = await fetch(apiUrl, {
                        method: 'POST',
@@ -705,7 +843,7 @@
                    const payload = {
                        contents: [{ role: "user", parts: [{ text: prompt }, { inlineData: { mimeType: "image/jpeg", data: base64ImageData }}]}],
                    };
-                   const apiKey = "";
+                   const apiKey = ""; // If you want to use models other than gemini-2.0-flash or imagen-3.0-generate-002, provide an API key here. Otherwise, leave this as-is.
                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
                    const response = await fetch(apiUrl, {
                        method: 'POST',
@@ -737,7 +875,7 @@
                });
                try {
                    const payload = { contents: [{ role: "user", parts: parts }] };
-                   const apiKey = "";
+                   const apiKey = ""; // If you want to use models other than gemini-2.0-flash or imagen-3.0-generate-002, provide an API key here. Otherwise, leave this as-is.
                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
                    const response = await fetch(apiUrl, {
                        method: 'POST',
@@ -759,10 +897,12 @@
                }
            }, [capturedImages, photoAngleNames]);
 
+
            return (
                <div className={`min-h-screen bg-gradient-to-br from-stone-100 to-stone-200 flex items-center justify-center ${appState === 'camera' ? 'p-0' : 'p-4'} font-inter text-gray-800`}>
                    <div className={`bg-white shadow-xl ${appState === 'camera' ? 'p-0 w-full h-screen rounded-none' : 'p-6 md:p-8 w-full max-w-4xl rounded-2xl'} border border-blue-200`}>
-                       {appState !== 'intro' && ( /* 首頁按鈕 */
+                       {/* 首頁按鈕 (Top Right) */}
+                       {appState !== 'intro' && (
                            <div className="absolute top-4 right-4 z-20">
                                <button onClick={() => setAppState('intro')} className="p-3 bg-blue-500 text-white rounded-full shadow-lg hover:bg-blue-600 transition-colors duration-200 flex items-center justify-center text-sm">
                                    <i className="fas fa-home mr-2"></i> 首頁
@@ -784,7 +924,14 @@
                                    </span><br/>
                                    請依照提示操作，感謝您的配合！
                                </p>
-                               <button onClick={() => setAppState('camera')} className="px-12 py-5 bg-blue-600 text-white rounded-full font-bold text-2xl shadow-lg hover:bg-blue-700 transition-all duration-300 transform hover:scale-105 active:scale-95 z-10 mt-8">
+                               <button 
+                                   onClick={() => {
+                                       setPhotoCount(0); // Ensure starting from first photo
+                                       setModalTitle(`開始拍攝 - ${photoAngleNames[0]}`);
+                                       setModalMessage(photoNotes[0]);
+                                       setShowModal(true);
+                                   }} 
+                                   className="px-12 py-5 bg-blue-600 text-white rounded-full font-bold text-2xl shadow-lg hover:bg-blue-700 transition-all duration-300 transform hover:scale-105 active:scale-95 z-10 mt-8">
                                    <i className="fas fa-camera mr-3"></i>開始拍照
                                </button>
                                <p className="mt-8 text-center text-xs text-gray-500">
@@ -797,7 +944,19 @@
                        )}
 
                        {appState === 'camera' && (
-                           <div className="flex flex-col h-full w-full">
+                           <div className="flex flex-col h-full w-full relative p-4 pb-0"> {/* Added relative and padding */}
+                               {/* Test Photo Button - Now at the top left */}
+                               <div className="absolute top-4 left-4 z-20">
+                                   <button 
+                                       onClick={handleTestCapturePhoto} 
+                                       disabled={!isCameraReady || cameraError || photoCount === MAX_PHOTOS}
+                                       className={`px-4 py-2 rounded-full text-white font-bold text-sm shadow-lg transform transition-all duration-300 
+                                           ${(isCameraReady && !cameraError && photoCount < MAX_PHOTOS) ? 'bg-purple-500 hover:bg-purple-600 active:scale-95' : 'bg-gray-400 cursor-not-allowed'}`}
+                                   >
+                                       <i className="fas fa-vial mr-2"></i> 測試拍照
+                                   </button>
+                               </div>
+
                                <h2 className="text-2xl font-bold text-center text-blue-700 pt-4 mb-4">
                                    <i className="fas fa-video mr-2"></i>拍照中
                                </h2>
@@ -811,7 +970,7 @@
                                    </p>
                                    {photoCount < MAX_PHOTOS && (
                                        <p className="mt-2 text-sm text-gray-600 max-w-md mx-auto">
-                                           {photoNotes[photoCount]}
+                                           {/* The notes here are intentionally empty because the full note is in the modal */}
                                        </p>
                                    )}
                                </div>
@@ -934,8 +1093,6 @@
                                <p className="text-sm text-gray-500 pb-4 text-center">
                                    請將患者臉部對準畫面中的九宮格及中央線。
                                </p>
-                               {/* Removed flashlight button and exposure compensation control */}
-
                            </div>
                        )}
 
@@ -970,7 +1127,7 @@
                            <div className="mt-8">
                                <h2 className="text-2xl font-bold text-center text-blue-700 mb-4">
                                    <i className="fas fa-images mr-2"></i>所有照片預覽
-                               </h2>
+                               </h2 >
                                <div className="bg-gray-100 p-4 rounded-xl shadow-inner border border-gray-200">
                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
                                        {capturedImages.map((image, index) => {
@@ -992,7 +1149,7 @@
                                            );
                                        })}
                                    </div>
-                                   <div className="flex justify-center mt-6">
+                                   <div className="flex justify-center mt-6 flex-col items-center">
                                        <button onClick={handleRetakeAllPhotos} className="px-6 py-2 bg-gray-500 text-white rounded-full hover:bg-gray-600 transition-colors duration-200 shadow-md text-base flex items-center justify-center">
                                            <i className="fas fa-redo-alt mr-2"></i> 重新拍照
                                        </button>
@@ -1001,12 +1158,15 @@
                                        您可以下載單張照片，或選擇重新拍攝所有照片。
                                    </p>
                                    <div className="mt-6 text-center">
-                                       <button onClick={handleGenerateSummaryReport} disabled={isSummaryLoading || capturedImages.length !== MAX_PHOTOS} className={`px-6 py-2 rounded-full text-white font-bold text-sm shadow-md transform transition-all duration-300 ${!isSummaryLoading && capturedImages.length === MAX_PHOTOS ? 'bg-teal-600 hover:bg-teal-700 active:scale-95' : 'bg-gray-400 cursor-not-allowed'}`}>
-                                           {isSummaryLoading ? '生成報告中...' : '生成綜合報告 ✨'}
-                                       </button>
-                                       {summaryReport && <div className="mt-3 p-3 bg-teal-50 text-teal-800 rounded-lg shadow-sm text-sm max-w-md mx-auto">
-                                          {summaryReport}
-                                       </div>}
+                                       {isSummaryLoading ? (
+                                            <p className="text-teal-600 font-bold text-lg mb-2">生成綜合報告中...</p>
+                                       ) : (
+                                           summaryReport && (
+                                               <div className="mt-3 p-3 bg-teal-50 text-teal-800 rounded-lg shadow-sm text-sm max-w-md mx-auto">
+                                                  {summaryReport}
+                                               </div>
+                                           )
+                                       )}
                                    </div>
                                    <p className="mt-6 text-center text-xs text-gray-500">
                                        此軟體為初版，可能無法適用於所有手機型號。若您在使用上遇到任何問題，請隨時與我們聯繫，以便我們進行優化與修正。感謝您的理解與支持。
@@ -1016,6 +1176,14 @@
                        )}
                        <canvas ref={photoCanvasRef} className="hidden"></canvas>
                    </div>
+
+                   {/* The Modal Component */}
+                   <Modal
+                       title={`請注意：${modalTitle}`}
+                       message={modalMessage}
+                       isVisible={showModal}
+                       onClose={handleCloseModalAndStartCamera}
+                   />
                </div>
            );
        }
